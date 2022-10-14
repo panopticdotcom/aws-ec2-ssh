@@ -60,6 +60,9 @@ fi
 # Possibility to provide custom userdel arguments
 : ${USERDEL_ARGS:="--force --remove"}
 
+# Allow truncation of usernames longer than 32 characters
+: ${ALLOW_TRUNCATION:=0}
+
 # Initizalize INSTANCE variable
 METADATA_TOKEN=$(curl -s -X PUT -H 'x-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)
 INSTANCE_ID=$(curl -s -H "x-aws-ec2-metadata-token: ${METADATA_TOKEN}" http://169.254.169.254/latest/meta-data/instance-id)
@@ -229,6 +232,9 @@ function clean_iam_username() {
     clean_username=${clean_username//"="/".equal."}
     clean_username=${clean_username//","/".comma."}
     clean_username=${clean_username//"@"/".at."}
+    if [ "${ALLOW_TRUNCATION}" = "1" ]; then
+        clean_username=${clean_username:0:32}
+    fi
     echo "${clean_username}"
 }
 

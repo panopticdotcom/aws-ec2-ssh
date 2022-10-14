@@ -96,7 +96,7 @@ This solution will use the following mapping for those special characters when c
 
 So instead of `name@email.com` you will need to use `name.at.email.com` when login via SSH.
 
-Linux user names may only be up to 32 characters long.
+Linux user names may only be up to 32 characters long.  If you have IAM usernames that, after mapping special characters, exceeds 32 characters, the account will not be created, unless you enable `ALLOW_TRUNCATION` which will truncate the username at 32 characters.  This does create the possibility of two IAM users potentially being mapped to the same Linux user account, so be careful.
 
 ## Configuration
 
@@ -116,6 +116,7 @@ USERADD_PROGRAM="/usr/sbin/useradd"            # The useradd program to use. def
 USERADD_ARGS="--create-home --shell /bin/bash" # Arguments for the useradd program. defaults to `--create-home --shell /bin/bash`
 USERDEL_PROGRAM="/usr/sbin/userdel"            # The userdel program to use. defaults to `/usr/sbin/userdel`
 USERDEL_ARGS="--force --remove"                # Arguments for the userdel program. defaults to `--force --remove`
+ALLOW_TRUNCATION="0"                           # Should long usernames be truncated or not
 ```
 
 The LOCAL_MARKER_GROUP will be created if it does not exist. BEWARE: DO NOT add any manually created users
