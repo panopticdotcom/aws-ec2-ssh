@@ -33,12 +33,20 @@ then
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 fi
 
-UnsaveUserName="$1"
-UnsaveUserName=${UnsaveUserName//".plus."/"+"}
-UnsaveUserName=${UnsaveUserName//".equal."/"="}
-UnsaveUserName=${UnsaveUserName//".comma."/","}
-UnsaveUserName=${UnsaveUserName//".at."/"@"}
+UserName="$1"
+UnsaveUserName=$(getent passwd "$UserName" | cut -d: -f5)
 
-aws iam list-ssh-public-keys --user-name "$UnsaveUserName" --query "SSHPublicKeys[?Status == 'Active'].[SSHPublicKeyId]" --output text | while read -r KeyId; do
+if [ -z "$UnsaveUserName" ]; then
+  UnsaveUserName="$UserName"
+  UnsaveUserName=${UnsaveUserName//".plus."/"+"}
+  UnsaveUserName=${UnsaveUserName//".equal."/"="}
+  UnsaveUserName=${UnsaveUserName//".comma."/","}
+  UnsaveUserName=${UnsaveUserName//".at."/"@"}
+fi
+
+aws iam list-ssh-public-keys --user-name "$UnsaveUserName" --query "SSHPublicKeys[?Status == 'Active'].[SSHPublicKeyId]" --output text 2>/dev/null | while read -r KeyId; do
   aws iam get-ssh-public-key --user-name "$UnsaveUserName" --ssh-public-key-id "$KeyId" --encoding SSH --query "SSHPublicKey.SSHPublicKeyBody" --output text
 done
+
+# execute ec2-instance-connect command if it exists
+test -f /opt/aws/bin/eic_run_authorized_keys && /opt/aws/bin/eic_run_authorized_keys "$@"

@@ -118,23 +118,6 @@ function get_iam_users() {
     fi
 }
 
-# Run all found iam users through clean_iam_username
-function get_clean_iam_users() {
-    local raw_username
-
-    for raw_username in $(get_iam_users); do
-        clean_iam_username "${raw_username}" | sed "s/\r//g"
-    done
-}
-
-# Get previously synced users
-function get_local_users() {
-    /usr/bin/getent group ${LOCAL_MARKER_GROUP} \
-        | cut -d : -f4- \
-        | sed "s/,/ /g"
-}
-
-# Get list of IAM groups marked with sudo access from tag
 function get_sudoers_groups_from_tag() {
     if [ "${SUDOERS_GROUPS_TAG}" ]
     then
@@ -159,55 +142,43 @@ function get_sudoers_users() {
         done
 }
 
-# Get the unix usernames of the IAM users within the sudo group
-function get_clean_sudoers_users() {
-    local raw_username
-
-    for raw_username in $(get_sudoers_users); do
-        clean_iam_username "${raw_username}"
-    done
-}
-
 # Create or update a local user based on info from the IAM group
 function create_or_update_local_user() {
     local username
-    local sudousers
+    local iam_username
+    local sudoer
     local localusergroups
 
     username="${1}"
-    sudousers="${2}"
+    iam_name="${2}"
+    sudoer="${3}"
     localusergroups="${LOCAL_MARKER_GROUP}"
 
     # check that username contains only alphanumeric, period (.), underscore (_), and hyphen (-) for a safe eval
-    if [[ ! "${username}" =~ ^[0-9a-zA-Z\._\-]{1,32}$ ]]
-    then
+    if [[ ! "${username}" =~ ^[0-9a-zA-Z\._\-]{1,32}$ ]]; then
         log "Local user name ${username} contains illegal characters"
         exit 1
     fi
 
-    if [ ! -z "${LOCAL_GROUPS}" ]
-    then
+    if [ ! -z "${LOCAL_GROUPS}" ]; then
         localusergroups="${LOCAL_GROUPS},${LOCAL_MARKER_GROUP}"
     fi
 
     if ! id "${username}" >/dev/null 2>&1; then
-        ${USERADD_PROGRAM} ${USERADD_ARGS} "${username}"
+        ${USERADD_PROGRAM} --comment "$iam_name" ${USERADD_ARGS} "${username}"
         /bin/chown -R "${username}:${username}" "$(eval echo ~$username)"
         log "Created new user ${username}"
     fi
-    /usr/sbin/usermod -a -G "${localusergroups}" "${username}"
+    /usr/sbin/usermod --comment "$iam_name" -a -G "${localusergroups}" "${username}"
 
     # Should we add this user to sudo ?
-    if [[ ! -z "${SUDOERS_GROUPS}" ]]
-    then
-        SaveUserFileName=$(echo "${username}" | tr "." " ")
-        SaveUserSudoFilePath="/etc/sudoers.d/$SaveUserFileName"
-        if [[ "${SUDOERS_GROUPS}" == "##ALL##" ]] || echo "${sudousers}" | grep "^${username}\$" > /dev/null
-        then
-            echo "${username} ALL=(ALL) NOPASSWD:ALL" > "${SaveUserSudoFilePath}"
-        else
-            [[ ! -f "${SaveUserSudoFilePath}" ]] || rm "${SaveUserSudoFilePath}"
-        fi
+    SaveUserFileName=$(echo "${username}" | tr "." "-")
+    SaveUserSudoFilePath="/etc/sudoers.d/$SaveUserFileName"
+
+    if [[ $sudoer -eq 1 ]]; then
+        echo "${username} ALL=(ALL) NOPASSWD:ALL" > "${SaveUserSudoFilePath}"
+    else
+        [[ ! -f "${SaveUserSudoFilePath}" ]] || rm "${SaveUserSudoFilePath}"
     fi
 }
 
@@ -228,13 +199,16 @@ function delete_local_user() {
 
 function clean_iam_username() {
     local clean_username="${1}"
+
     clean_username=${clean_username//"+"/".plus."}
     clean_username=${clean_username//"="/".equal."}
     clean_username=${clean_username//","/".comma."}
     clean_username=${clean_username//"@"/".at."}
+
     if [ "${ALLOW_TRUNCATION}" = "1" ]; then
         clean_username=${clean_username:0:32}
     fi
+
     echo "${clean_username}"
 }
 
@@ -252,9 +226,8 @@ function sync_accounts() {
     local iam_users
     local sudo_users
     local local_users
-    local intersection
-    local removed_users
     local user
+    local sudoer
 
     # init group and sudoers from tags
     get_iam_groups_from_tag
@@ -262,39 +235,55 @@ function sync_accounts() {
 
     # setup the aws credentials if needed
     setup_aws_credentials
-    
-    iam_users=$(get_clean_iam_users | sort | uniq)
-    if [[ -z "${iam_users}" ]]
-    then
+
+    # Get IAM users
+    declare -A iam_users
+    for user in $(get_iam_users); do
+      iam_users+=([$(clean_iam_username "$user")]=$user)
+    done
+
+    if [[ ${#iam_users[@]} -eq 0 ]]; then
       log "we just got back an empty iam_users user list which is likely caused by an IAM outage!"
       exit 1
     fi
 
-    sudo_users=$(get_clean_sudoers_users | sort | uniq)
-    if [[ ! -z "${SUDOERS_GROUPS}" ]] && [[ ! "${SUDOERS_GROUPS}" == "##ALL##" ]] && [[ -z "${sudo_users}" ]]
-    then
+    # Get sudo users
+    declare -A sudo_users
+    for user in $(get_sudoers_users); do
+      sudo_users+=([$(clean_iam_username "$user")]=$user)
+    done
+
+    if [[ ! -z "${SUDOERS_GROUPS}" && "${SUDOERS_GROUPS}" != "##ALL##" && ${#sudo_users[@]} -eq 0 ]]; then
       log "we just got back an empty sudo_users user list which is likely caused by an IAM outage!"
       exit 1
     fi
 
-    local_users=$(get_local_users | sort | uniq)
-
-    intersection=$(echo ${local_users} ${iam_users} | tr " " "\n" | sort | uniq -D | uniq)
-    removed_users=$(echo ${local_users} ${intersection} | tr " " "\n" | sort | uniq -u)
+    # Get previously synced users
+    declare -a local_users
+    for user in $(/usr/bin/getent group ${LOCAL_MARKER_GROUP} | cut -d : -f4- | sed "s/,/ /g"); do
+      local_users+=($user)
+    done
 
     # Add or update the users found in IAM
-    for user in ${iam_users}; do
-        if [ "${#user}" -le "32" ]
-        then
-            create_or_update_local_user "${user}" "$sudo_users"
+    for user in ${!iam_users[@]}; do
+        if [ "${#user}" -le "32" ]; then
+            sudoer=0
+
+            if [[ "${SUDOERS_GROUPS}" == "##ALL##" || ${#sudo_users[$user]} -gt 0 ]]; then
+                sudoer=1
+            fi
+
+            create_or_update_local_user "${user}" "${iam_users[$user]}" $sudoer
         else
             log "Can not import IAM user ${user}. User name is longer than 32 characters."
         fi
     done
 
     # Remove users no longer in the IAM group(s)
-    for user in ${removed_users}; do
-        delete_local_user "${user}"
+    for user in ${local_users[@]}; do
+        if [ ${#iam_users[$user]} -eq 0 ]; then
+            delete_local_user "${user}"
+        fi
     done
 }
 
